@@ -1,8 +1,10 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
+  CheckCircle2,
   Copy,
+  LogOut,
   Plus,
   QrCode,
   RefreshCw,
@@ -31,6 +33,8 @@ interface SettingsViewProps {
   canEditEvolutionConfig: boolean;
   /** Pode operar canais: travas anti-bloqueio, leitura de QR, etc. */
   canEditChannels: boolean;
+  /** Pode desconectar / sair da instância (logout). Restrito a admins e devs. */
+  canDisconnectChannel?: boolean;
   canCreateMetaChannel?: boolean;
   canDeleteChannel?: boolean;
   canViewSecrets?: boolean;
@@ -49,6 +53,7 @@ export function SettingsView({
   onNotify,
   canEditEvolutionConfig,
   canEditChannels,
+  canDisconnectChannel = false,
   canCreateMetaChannel = true,
   canDeleteChannel = true,
   canViewSecrets = true,
@@ -96,6 +101,46 @@ export function SettingsView({
   const [evolutionQrImg, setEvolutionQrImg] = useState<string | null>(null);
   const [evolutionQrError, setEvolutionQrError] = useState<string | null>(null);
   const [loadingQr, setLoadingQr] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [waitingScan, setWaitingScan] = useState(false);
+  const qrPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopQrPolling = () => {
+    if (qrPollRef.current) {
+      clearInterval(qrPollRef.current);
+      qrPollRef.current = null;
+    }
+    setWaitingScan(false);
+  };
+
+  // Enquanto o QR está na tela, o Baileys não "avisa" o CRM — então consultamos
+  // o estado da instância em intervalo. Isso detecta o pareamento (state=open) e
+  // ainda renova o QR, que expira a cada ~30-60s no WhatsApp.
+  const startQrPolling = (channelId: string) => {
+    stopQrPolling();
+    setWaitingScan(true);
+    let ticks = 0;
+    qrPollRef.current = setInterval(async () => {
+      ticks += 1;
+      try {
+        const res = await apiClient.getEvolutionQr(channelId);
+        if (res.status === "open") {
+          stopQrPolling();
+          setEvolutionQrImg(null);
+          onNotify("WhatsApp conectado com sucesso!");
+          await onRefreshState();
+          return;
+        }
+        if (res.qrImageBase64) setEvolutionQrImg(res.qrImageBase64);
+      } catch {
+        // erros transitórios durante o polling são ignorados
+      }
+      if (ticks >= 40) stopQrPolling(); // ~2 min a cada 3s
+    }, 3000);
+  };
+
+  // Garante que o polling pare ao desmontar o componente.
+  useEffect(() => () => stopQrPolling(), []);
   const [testingEvolution, setTestingEvolution] = useState(false);
   const [evolutionFeedback, setEvolutionFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
 
@@ -242,14 +287,40 @@ export function SettingsView({
       const res = await apiClient.getEvolutionQr(evolutionChannel.id);
       setEvolutionQrImg(res.qrImageBase64);
       if (res.status === "open") {
+        stopQrPolling();
         onNotify("Instância Evolution API já está conectada (open)!");
+      } else {
+        // Começa a aguardar o scan: detecta o pareamento e renova o QR.
+        startQrPolling(evolutionChannel.id);
       }
       await onRefreshState();
     } catch (err) {
+      stopQrPolling();
       setEvolutionQrImg(null);
       setEvolutionQrError(err instanceof Error ? err.message : "Erro ao buscar QR Code na Evolution API.");
     } finally {
       setLoadingQr(false);
+    }
+  };
+
+  const handleDisconnectEvolution = async () => {
+    if (!evolutionChannel || !canDisconnectChannel) return;
+    const ok = window.confirm(
+      "Sair desta instância vai encerrar a sessão do WhatsApp e remover o aparelho de \"Aparelhos conectados\". Será necessário ler um novo QR Code para reconectar. Deseja continuar?",
+    );
+    if (!ok) return;
+    setDisconnecting(true);
+    stopQrPolling();
+    try {
+      await apiClient.disconnectChannel(evolutionChannel.id);
+      setEvolutionQrImg(null);
+      setEvolutionQrError(null);
+      await onRefreshState();
+      onNotify("Instância desconectada. Leia um novo QR Code para reconectar.");
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : "Erro ao desconectar a instância.");
+    } finally {
+      setDisconnecting(false);
     }
   };
 
@@ -751,44 +822,92 @@ export function SettingsView({
                   ) : null}
                 </form>
 
-                {/* QR Code Real da Evolution API */}
-                <div className="flex flex-col items-center justify-between rounded-2xl border border-slate-200 bg-white p-5 text-center shadow-sm">
-                  <div>
-                    <h4 className="text-sm font-bold text-slate-900">QR Code ao Vivo (Evolution API)</h4>
-                    <p className="mt-1 text-xs text-slate-500">
-                      Busca o QR Code de pareamento direto do endpoint /instance/connect da sua Evolution API.
-                    </p>
-                  </div>
+                {/* QR Code / Estado da conexão Evolution API */}
+                {evolutionChannel.status === "connected" ? (
+                  <div className="flex flex-col items-center justify-between rounded-2xl border border-emerald-200 bg-white p-5 text-center shadow-sm">
+                    <div>
+                      <h4 className="text-sm font-bold text-slate-900">Instância conectada</h4>
+                      <p className="mt-1 text-xs text-slate-500">
+                        Esta instância já está pareada ao WhatsApp. Não é necessário ler o QR Code.
+                      </p>
+                    </div>
 
-                  <div className="my-4 flex h-48 w-48 items-center justify-center rounded-2xl border-2 border-dashed border-slate-200 bg-slate-50 p-3">
-                    {loadingQr ? (
-                      <div className="flex h-full w-full flex-col items-center justify-center gap-2">
-                        <div className="h-28 w-28 animate-pulse rounded-xl bg-slate-200" />
-                        <div className="h-2.5 w-24 animate-pulse rounded bg-slate-200" />
-                      </div>
-                    ) : evolutionQrImg ? (
-                      <img src={evolutionQrImg} alt="QR Code Evolution API" className="h-44 w-44 rounded-lg object-contain" />
-                    ) : evolutionQrError ? (
-                      <p className="text-[11px] font-medium text-red-600">{evolutionQrError}</p>
+                    <div className="my-4 flex h-48 w-48 flex-col items-center justify-center gap-3 rounded-2xl border-2 border-emerald-200 bg-emerald-50 p-3">
+                      <CheckCircle2 className="h-16 w-16 text-emerald-600" />
+                      <p className="text-sm font-bold text-emerald-800">Conectado</p>
+                      {evolutionChannel.phoneNumber && (
+                        <p className="text-xs font-medium text-emerald-700">
+                          {evolutionChannel.phoneNumber}
+                        </p>
+                      )}
+                    </div>
+
+                    {canDisconnectChannel ? (
+                      <button
+                        type="button"
+                        onClick={handleDisconnectEvolution}
+                        disabled={disconnecting}
+                        className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl border border-red-200 bg-red-50 py-2 text-xs font-bold text-red-700 hover:bg-red-100 disabled:opacity-50"
+                      >
+                        <LogOut className={cn("h-3.5 w-3.5", disconnecting && "animate-pulse")} />
+                        {disconnecting ? "Desconectando..." : "Sair da instância"}
+                      </button>
                     ) : (
-                      <p className="text-xs text-slate-400">
-                        Salve URL + Instância e clique abaixo para buscar o QR Code na Evolution API.
+                      <p className="text-[11px] font-medium text-slate-400">
+                        Apenas administradores e desenvolvedores podem desconectar.
                       </p>
                     )}
                   </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-between rounded-2xl border border-slate-200 bg-white p-5 text-center shadow-sm">
+                    <div>
+                      <h4 className="text-sm font-bold text-slate-900">QR Code ao Vivo (Evolution API)</h4>
+                      <p className="mt-1 text-xs text-slate-500">
+                        Busca o QR Code de pareamento direto do endpoint /instance/connect da sua Evolution API.
+                      </p>
+                    </div>
 
-                  {canEditChannels && (
-                    <button
-                      type="button"
-                      onClick={handleFetchEvolutionQr}
-                      disabled={loadingQr}
-                      className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 py-2 text-xs font-bold text-emerald-800 hover:bg-emerald-100 disabled:opacity-50"
-                    >
-                      <RefreshCw className={cn("h-3.5 w-3.5", loadingQr && "animate-spin")} />
-                      {loadingQr ? "Consultando Evolution API..." : "Buscar QR Code da Evolution API"}
-                    </button>
-                  )}
-                </div>
+                    <div className="my-4 flex h-48 w-48 items-center justify-center rounded-2xl border-2 border-dashed border-slate-200 bg-slate-50 p-3">
+                      {loadingQr ? (
+                        <div className="flex h-full w-full flex-col items-center justify-center gap-2">
+                          <div className="h-28 w-28 animate-pulse rounded-xl bg-slate-200" />
+                          <div className="h-2.5 w-24 animate-pulse rounded bg-slate-200" />
+                        </div>
+                      ) : evolutionQrImg ? (
+                        <img src={evolutionQrImg} alt="QR Code Evolution API" className="h-44 w-44 rounded-lg object-contain" />
+                      ) : evolutionQrError ? (
+                        <p className="text-[11px] font-medium text-red-600">{evolutionQrError}</p>
+                      ) : (
+                        <p className="text-xs text-slate-400">
+                          Salve URL + Instância e clique abaixo para buscar o QR Code na Evolution API.
+                        </p>
+                      )}
+                    </div>
+
+                    {waitingScan && !loadingQr && (
+                      <p className="mb-2 flex items-center justify-center gap-1.5 text-[11px] font-semibold text-emerald-700">
+                        <RefreshCw className="h-3 w-3 animate-spin" />
+                        Aguardando leitura do QR Code...
+                      </p>
+                    )}
+
+                    {canEditChannels && (
+                      <button
+                        type="button"
+                        onClick={handleFetchEvolutionQr}
+                        disabled={loadingQr}
+                        className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 py-2 text-xs font-bold text-emerald-800 hover:bg-emerald-100 disabled:opacity-50"
+                      >
+                        <RefreshCw className={cn("h-3.5 w-3.5", (loadingQr || waitingScan) && "animate-spin")} />
+                        {loadingQr
+                          ? "Consultando Evolution API..."
+                          : waitingScan
+                            ? "Gerar novo QR Code"
+                            : "Buscar QR Code da Evolution API"}
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>
