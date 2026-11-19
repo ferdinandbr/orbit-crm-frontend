@@ -15,6 +15,7 @@ export default function ConfiguracoesPage() {
       canEditEvolutionConfig={can("channels:evolution:create")}
       canCreateMetaChannel={can("channels:meta:create")}
       canEditChannels={can("channels:edit")}
+      canDisconnectChannel={can("channels:disconnect")}
       canDeleteChannel={can("channels:delete")}
       canViewSecrets={can("channels:secrets:view")}
       canViewTemplates={can("templates:view")}

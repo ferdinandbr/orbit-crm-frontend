@@ -440,6 +440,12 @@ export const apiClient = {
     return apiRequest(`/channels/${channelId}`, { method: "DELETE" });
   },
 
+  disconnectChannel(channelId: string): Promise<{ status: string }> {
+    return apiRequest<{ status: string }>(`/channels/${channelId}/disconnect`, {
+      method: "POST",
+    });
+  },
+
   getEvolutionQr(channelId: string): Promise<{ status: string; qrImageBase64: string | null }> {
     return apiRequest<{ status: string; qrImageBase64: string | null }>(`/channels/${channelId}/qr`);
   },
